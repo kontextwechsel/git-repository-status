@@ -1,0 +1,213 @@
+#!/bin/bash
+
+unset color_option color_gray color_blue color_reset
+if [[ -t 1 ]]; then
+  readonly color_option="always"
+  readonly color_gray="\x1B[30m"
+  readonly color_blue="\x1B[4;34m"
+  readonly color_reset="\x1B[m"
+else
+  readonly color_option="never"
+fi
+
+unset option_fetch option_check option_prune working_directory
+while (( "${#}" > 0 )); do
+  case "${1}" in
+    -f | --fetch)
+      option_fetch="on"
+      shift
+      ;;
+    -c | --check)
+      option_check="on"
+      shift
+      ;;
+    -p | --prune)
+      option_prune="on"
+      shift
+      ;;
+    *)
+      if [[ -d "$1" ]]; then
+        working_directory="$1"
+        shift
+      else
+        printf "Usage: %s [OPTIONS] [DIRECTORY]\n" "${BASH_SOURCE[0]}"
+        printf "\t-f, --fetch\n"
+        printf "\t-c, --check\n"
+        printf "\t-p, --prune\n"
+        exit
+      fi
+      ;;
+  esac
+done
+if [[ -z "${working_directory:+substitution}" ]]; then
+  working_directory="$(pwd)"
+fi
+readonly option_fetch option_check option_prune working_directory
+
+readarray -t buffer < <(find "${working_directory}" -type d -name ".git" | sort)
+readonly  buffer
+n="${#buffer[@]}"
+for entry in "${buffer[@]}"; do
+  # Set Git environment
+  export GIT_DIR="${entry}/"
+  export GIT_WORK_TREE="${entry%.git}"
+
+  # Print name and directory
+  printf "┌╴${color_blue}%s${color_reset}\n" "Repository"
+  printf "│\n"
+  printf "│ %s ${color_gray}%s${color_reset}\n" "$(basename "${GIT_WORK_TREE}")" "$(cd "${GIT_WORK_TREE}" && dirs +0)"
+
+  # Print remotes and fetch updates
+  readarray -t remotes < <(git remote)
+  default_branch="$(git config --global init.defaultBranch)"
+  if (( "${#remotes[@]}" > 0 )); then
+    printf "│\n"
+    printf "├╴${color_blue}%s${color_reset}\n" "Remotes"
+    printf "│\n"
+
+    for remote in "${remotes[@]}"; do
+      printf "│ %s ${color_gray}%s${color_reset}\n" "${remote}" "$(git remote get-url "${remote}")"
+    done
+
+    if [[ "${option_fetch}" == "on" ]]; then
+      printf "│\n"
+      printf "├╴${color_blue}%s${color_reset}\n" "Fetch"
+      printf "│\n"
+      for remote in "${remotes[@]}"; do
+        readarray -t output < <(git fetch --verbose "${remote}" 2>&1)
+        printf "${color_reset}│ ${color_gray}%s${color_reset}\n" "${output[@]}"
+        readarray -t output < <(git remote set-head "${remote}" --auto 2>&1)
+        printf "${color_reset}│ ${color_gray}%s${color_reset}\n" "${output[@]}"
+      done
+    fi
+
+    for remote in "${remotes[@]}"; do
+      if [[ "${remote}" == "origin" ]]; then
+        remote_branch="$(git branch --list --remote origin/HEAD --format="%(symref:lstrip=3)")"
+        if [[ -n "${remote_branch}" ]]; then
+          default_branch="${remote_branch}"
+        fi
+      fi
+    done
+  fi
+
+  # Print branches
+  readarray -t branches < <(git branch --list --ignore-case --format="%(refname:lstrip=2)")
+  if (( "${#branches[@]}" > 0 )); then
+    printf "│\n"
+    printf "├╴${color_blue}%s${color_reset}\n" "Branches"
+    printf "│\n"
+
+    for branch in "${branches[@]}"; do
+      format_string+="%(color:red)"
+      format_string="["
+      if git rev-parse --quiet --verify "origin/${branch}" > /dev/null; then
+          local_revision_difference="$(git rev-list "${branch}" "^origin/${branch}" -- | wc -l)"
+          remote_revision_difference="$(git rev-list "^${branch}" "origin/${branch}" -- | wc -l)"
+          if (( "${local_revision_difference}" > 0 )); then
+              if (( "${remote_revision_difference}" > 0 )); then
+                  format_string+="%(color:red)"
+                  format_string+="↕"
+              else
+                  format_string+="%(color:red)"
+                  format_string+="↑"
+              fi
+          else
+              if (( "${remote_revision_difference}" > 0 )); then
+                  format_string+="%(color:green)"
+                  format_string+="↓"
+              else
+                  format_string+="%(color:reset)"
+                  format_string+=" "
+              fi
+          fi
+      else
+          format_string+="%(color:yellow)"
+          format_string+="*"
+      fi
+      if git rev-parse --quiet --verify "${default_branch}" > /dev/null; then
+        default_revision_difference="$(git rev-list "${branch}" "^${default_branch}" -- | wc -l)"
+        if (( "${default_revision_difference}" > 0 )); then
+          format_string+="%(color:red)"
+          format_string+="!"
+        else
+          format_string+="%(color:reset)"
+          format_string+=" "
+        fi
+      else
+        format_string+="%(color:black)"
+        format_string+="?"
+      fi
+      format_string+="%(color:reset)"
+      format_string+="]"
+      format_string+=" "
+      if [[ "${branch}" == "${default_branch}" ]]; then
+        format_string+="%(color:green)"
+      else
+        if [[ "${branch}" == "$(git symbolic-ref --quiet --short HEAD)" ]]; then
+          format_string+="%(color:yellow)"
+        else
+          format_string+="%(color:reset)"
+        fi
+      fi
+      format_string+="%(refname:lstrip=2)"
+      format_string+="%(color:reset)"
+      format_string+=" "
+      format_string+="%(color:black)"
+      format_string+="%(objectname)"
+      format_string+="%(color:reset)"
+      readarray -t output < <(git branch "${branch}" --list --format="${format_string}" --color="${color_option}")
+      printf "│ %s\n" "${output[@]}"
+    done
+  fi
+
+  # Print changes
+  readarray -t changes < <(git -c color.status="${color_option}" status --short)
+  if (( "${#changes[@]}" > 0 )); then
+    printf "│\n"
+    printf "├╴${color_blue}%s${color_reset}\n" "Changes"
+    printf "│\n"
+
+    while IFS=$'\t' read -r status file; do
+      change="[${status}] ${file}"
+      if [[ -e "${file}" ]]; then
+        change+="${color_reset}"
+        change+=" "
+        change+="${color_gray}"
+        change+="$(date --date="@$(stat -c "%Y" "${file}")" --iso-8601=seconds)"
+        change+="${color_reset}"
+      fi
+      printf "│ %b\n" "${change}"
+    done < <(printf "%s\n" "${changes[@]}" | awk 'BEGIN { FS="\n" } match($0, "^([ ]?[^ ]+[ ]?)[ ](.*)$", m) { print m[1] "\t" m[2] }')
+  fi
+
+  # Check repository
+  if [[ "${option_check}" == "on" ]]; then
+    readarray -t output < <(git fsck --full 2>&1)
+    if (( "${#output[@]}" > 0 )); then
+      printf "│\n"
+      printf "├╴${color_blue}%s${color_reset}\n" "Check"
+      printf "│\n"
+      printf "${color_reset}│ ${color_gray}%s${color_reset}\n" "${output[@]}"
+    fi
+  fi
+
+  # Prune references
+  if [[ "${option_prune}" == "on" ]]; then
+    readarray -t output < <(git reflog expire --expire-unreachable=now --all 2>&1)
+    readarray -t temp < <(git gc --prune=now 2>&1)
+    output+=("${temp[@]}")
+    if (( "${#output[@]}" > 0 )); then
+      printf "│\n"
+      printf "├╴${color_blue}%s${color_reset}\n" "Check"
+      printf "│\n"
+      printf "${color_reset}│ ${color_gray}%s${color_reset}\n" "${output[@]}"
+    fi
+  fi
+
+  printf "└╴\n"
+  n=$(( n - 1 ))
+  if (( n > 0 )); then
+      printf "\n"
+  fi
+done
